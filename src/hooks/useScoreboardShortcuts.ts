@@ -9,7 +9,9 @@ export function useScoreboardShortcuts() {
   const toggleGoldenScore = useScoreboardStore((s) => s.toggleGoldenScore);
   const resetTempo = useScoreboardStore((s) => s.resetTempo);
 
-  // Pontuações Branco
+  // Pontuações Branco & Azul
+  const adicionarYuko = useScoreboardStore((s) => s.adicionarYuko);
+  const removerYuko = useScoreboardStore((s) => s.removerYuko);
   const adicionarWazaAri = useScoreboardStore((s) => s.adicionarWazaAri);
   const removerWazaAri = useScoreboardStore((s) => s.removerWazaAri);
   const adicionarIppon = useScoreboardStore((s) => s.adicionarIppon);
@@ -67,7 +69,13 @@ export function useScoreboardShortcuts() {
           toketa();
           break;
 
-        // PONTUAÇÕES DO ATLETA BRANCO (Lado Esquerdo do Teclado: W, I, 1)
+        // PONTUAÇÕES DO ATLETA BRANCO (Lado Esquerdo do Teclado: Y, W, I, 1)
+        case 'y':
+          e.preventDefault();
+          if (isShift) removerYuko('Branco');
+          else adicionarYuko('Branco');
+          break;
+
         case 'w':
           e.preventDefault();
           if (isShift) removerWazaAri('Branco');
@@ -85,7 +93,13 @@ export function useScoreboardShortcuts() {
           else adicionarShido('Branco');
           break;
 
-        // PONTUAÇÕES DO ATLETA AZUL (Lado Direito: E, K, 2)
+        // PONTUAÇÕES DO ATLETA AZUL (Lado Direito: U, E, K, 2)
+        case 'u':
+          e.preventDefault();
+          if (isShift) removerYuko('Azul');
+          else adicionarYuko('Azul');
+          break;
+
         case 'e':
           e.preventDefault();
           if (isShift) removerWazaAri('Azul');
@@ -114,6 +128,8 @@ export function useScoreboardShortcuts() {
     toggleSonoMama,
     toggleGoldenScore,
     resetTempo,
+    adicionarYuko,
+    removerYuko,
     adicionarWazaAri,
     removerWazaAri,
     adicionarIppon,

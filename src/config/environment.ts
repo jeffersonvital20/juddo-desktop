@@ -23,8 +23,8 @@ const AMBIENTES_PREDEFINIDOS: Record<'development' | 'staging' | 'production', {
   },
   production: {
     label: 'Produção Oficial',
-    apiUrl: import.meta.env.VITE_DEFAULT_API_URL || 'https://api.judoo.com/api',
-    hubUrl: import.meta.env.VITE_DEFAULT_HUB_URL || 'https://api.judoo.com/hubs/tatame',
+    apiUrl: import.meta.env.VITE_DEFAULT_API_URL || 'http://localhost:8080/api',
+    hubUrl: import.meta.env.VITE_DEFAULT_HUB_URL || 'http://localhost:8080/hubs/tatame',
   },
 };
 

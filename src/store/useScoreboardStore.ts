@@ -1,11 +1,29 @@
 import { create } from 'zustand';
-import { desktopApi, LutaDetalhesDto } from '../services/api';
+import {
+  desktopApi,
+  CampeonatoDto,
+  TatameStatusDto,
+  LutaDetalhesDto,
+} from '../services/api';
 
 export type CorJudogi = 'Branco' | 'Azul';
-export type TipoVitoria = 'Ippon' | 'WazaAriAwaseteIppon' | 'WazaAri' | 'HansokuMake' | 'GoldenScorePoint' | 'Decisao';
+export type TipoVitoria =
+  | 'Ippon'
+  | 'WazaAriAwaseteIppon'
+  | 'WazaAri'
+  | 'Yuko'
+  | 'HansokuMake'
+  | 'GoldenScorePoint'
+  | 'Decisao';
 
 export interface ScoreboardState {
-  // Metadados do Tatame e Luta
+  // Dados reais vindos do Backend
+  campeonatos: CampeonatoDto[];
+  campeonatoId: string;
+  tatames: TatameStatusDto[];
+  lutasDisponiveis: LutaDetalhesDto[];
+
+  // Metadados do Tatame e Luta Atual
   tatameId: string;
   tatameNome: string;
   lutaId: string;
@@ -17,9 +35,11 @@ export interface ScoreboardState {
   atletaAzulNome: string;
   atletaAzulClube: string;
   apiConectada: boolean;
+  carregandoBackend: boolean;
+  erroBackend: string | null;
 
   // Cronômetro Principal da Luta
-  tempoPrincipalSegundos: number; // Padrão 240 (4 minutos)
+  tempoPrincipalSegundos: number;
   tempoInicialSegundos: number;
   cronometroRodando: boolean;
   emGoldenScore: boolean;
@@ -33,10 +53,12 @@ export interface ScoreboardState {
   // Pontuações
   ipponBranco: number;
   wazaAriBranco: number;
+  yukoBranco: number;
   shidoBranco: number;
 
   ipponAzul: number;
   wazaAriAzul: number;
+  yukoAzul: number;
   shidoAzul: number;
 
   // Estado de Fim de Luta
@@ -44,10 +66,13 @@ export interface ScoreboardState {
   vencedor: CorJudogi | null;
   tipoVitoria: TipoVitoria | null;
 
-  // Ações do Tatame e Sincronização
-  setTatame: (tatameId: string, tatameNome: string) => void;
-  carregarLuta: (luta: LutaDetalhesDto) => void;
+  // Ações de Conexão, Campeonato, Tatame e Luta
+  setCampeonato: (campeonatoId: string) => Promise<void>;
+  setTatame: (tatameId: string) => Promise<void>;
+  selecionarLutaNoTatame: (lutaId: string) => Promise<void>;
+  carregarLuta: (luta: LutaDetalhesDto | null) => void;
   sincronizarComBackend: () => Promise<void>;
+  limparSessao: () => void;
 
   // Ações do Cronômetro
   toggleCronometro: () => void;
@@ -62,6 +87,8 @@ export interface ScoreboardState {
   toketa: () => void;
 
   // Ações de Pontuação
+  adicionarYuko: (cor: CorJudogi) => void;
+  removerYuko: (cor: CorJudogi) => void;
   adicionarWazaAri: (cor: CorJudogi) => void;
   removerWazaAri: (cor: CorJudogi) => void;
   adicionarIppon: (cor: CorJudogi) => void;
@@ -72,10 +99,50 @@ export interface ScoreboardState {
   novaLuta: (tempoSegundos?: number) => void;
 }
 
+const ESTADO_LUTA_VAZIA = {
+  lutaId: '',
+  atletaBrancoId: undefined,
+  atletaAzulId: undefined,
+  categoria: 'Nenhuma luta ativa neste tatame',
+  atletaBrancoNome: 'Aguardando Atleta (Shiro)',
+  atletaBrancoClube: 'Selecione uma luta do tatame',
+  atletaAzulNome: 'Aguardando Atleta (Ao)',
+  atletaAzulClube: 'Selecione uma luta do tatame',
+  tempoPrincipalSegundos: 240,
+  tempoInicialSegundos: 240,
+  cronometroRodando: false,
+  emGoldenScore: false,
+  sonoMama: false,
+  osaekomiAtivo: false,
+  osaekomiCor: null as CorJudogi | null,
+  osaekomiSegundos: 0,
+  ipponBranco: 0,
+  wazaAriBranco: 0,
+  yukoBranco: 0,
+  shidoBranco: 0,
+  ipponAzul: 0,
+  wazaAriAzul: 0,
+  yukoAzul: 0,
+  shidoAzul: 0,
+  lutaFinalizada: false,
+  vencedor: null as CorJudogi | null,
+  tipoVitoria: null as TipoVitoria | null,
+};
+
 export const useScoreboardStore = create<ScoreboardState>((set, get) => {
-  // Auxiliar seguro para envio em segundo plano
-  const dispararPontuacao = (cor: CorJudogi, tipo: 'WazaAri' | 'Ippon' | 'Shido' | 'CancelarWazaAri' | 'CancelarShido') => {
+  const dispararPontuacao = (
+    cor: CorJudogi,
+    tipo:
+      | 'Yuko'
+      | 'WazaAri'
+      | 'Ippon'
+      | 'Shido'
+      | 'CancelarYuko'
+      | 'CancelarWazaAri'
+      | 'CancelarShido'
+  ) => {
     const s = get();
+    if (!s.lutaId || !s.tatameId) return;
     desktopApi
       .pontuar(s.lutaId, {
         tatameId: s.tatameId,
@@ -83,12 +150,23 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
         tipo,
         tempoLutaSegundos: s.tempoPrincipalSegundos,
       })
-      .then(() => set({ apiConectada: true }))
-      .catch(() => set({ apiConectada: false }));
+      .then(() => set({ apiConectada: true, erroBackend: null }))
+      .catch((err) =>
+        set({
+          apiConectada: false,
+          erroBackend: err instanceof Error ? err.message : 'Falha ao sincronizar pontuação',
+        })
+      );
   };
 
-  const dispararCronometro = (rodando: boolean, tempo: number, golden: boolean, sonoMama: boolean) => {
+  const dispararCronometro = (
+    rodando: boolean,
+    tempo: number,
+    golden: boolean,
+    sonoMama: boolean
+  ) => {
     const s = get();
+    if (!s.lutaId || !s.tatameId) return;
     desktopApi
       .sincronizarCronometro(s.lutaId, {
         tatameId: s.tatameId,
@@ -97,12 +175,22 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
         emGoldenScore: golden,
         sonoMama,
       })
-      .then(() => set({ apiConectada: true }))
-      .catch(() => set({ apiConectada: false }));
+      .then(() => set({ apiConectada: true, erroBackend: null }))
+      .catch((err) =>
+        set({
+          apiConectada: false,
+          erroBackend: err instanceof Error ? err.message : 'Falha ao sincronizar cronômetro',
+        })
+      );
   };
 
-  const dispararOsaekomi = (acao: 'Iniciar' | 'Parar' | 'Toketa', cor?: CorJudogi | null, seg = 0) => {
+  const dispararOsaekomi = (
+    acao: 'Iniciar' | 'AtualizarSegundos' | 'Parar' | 'Toketa',
+    cor?: CorJudogi | null,
+    seg = 0
+  ) => {
     const s = get();
+    if (!s.lutaId || !s.tatameId) return;
     desktopApi
       .controlarOsaekomi(s.lutaId, {
         tatameId: s.tatameId,
@@ -110,106 +198,258 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
         judogi: cor || undefined,
         segundos: seg,
       })
-      .then(() => set({ apiConectada: true }))
-      .catch(() => set({ apiConectada: false }));
+      .then(() => set({ apiConectada: true, erroBackend: null }))
+      .catch((err) =>
+        set({
+          apiConectada: false,
+          erroBackend: err instanceof Error ? err.message : 'Falha ao sincronizar Osaekomi',
+        })
+      );
   };
 
   const dispararFimLuta = (vencedor: CorJudogi, tipoVitoria: string) => {
     const s = get();
+    if (!s.lutaId) return;
     const vencedorId = vencedor === 'Branco' ? s.atletaBrancoId : s.atletaAzulId;
+    const tipoVitoriaBackend =
+      tipoVitoria === 'GoldenScorePoint' ? 'WazaAri' : tipoVitoria;
     desktopApi
       .alterarStatusLuta(s.lutaId, {
         status: 'Finalizada',
         vencedorId,
-        tipoVitoria,
+        tipoVitoria: tipoVitoriaBackend,
       })
-      .then(() => set({ apiConectada: true }))
-      .catch(() => set({ apiConectada: false }));
+      .then(() => {
+        set({ apiConectada: true, erroBackend: null });
+        // Recarrega a lista de lutas do campeonato para exibir a luta da próxima fase (Copa) com o vencedor avançado
+        desktopApi
+          .getLutasCampeonato(s.campeonatoId)
+          .then((lutas) => set({ lutasDisponiveis: lutas }))
+          .catch(() => {});
+      })
+      .catch((err) =>
+        set({
+          apiConectada: false,
+          erroBackend: err instanceof Error ? err.message : 'Falha ao finalizar luta no backend',
+        })
+      );
   };
 
   return {
-    tatameId: '60000000-0000-0000-0000-000000000001',
-    tatameNome: 'Tatame 1 - Shiai-Jo A',
-    lutaId: '70000000-0000-0000-0000-000000000001',
-    categoria: 'Sênior Masculino -66kg (Final)',
-    atletaBrancoNome: 'Gabriel Santos',
-    atletaBrancoClube: 'ECP - Pinheiros (SP)',
-    atletaAzulNome: 'Lucas Oliveira',
-    atletaAzulClube: 'MTC - Minas Tênis (MG)',
-    apiConectada: true,
+    campeonatos: [],
+    campeonatoId: '',
+    tatames: [],
+    lutasDisponiveis: [],
 
-    tempoPrincipalSegundos: 240,
-    tempoInicialSegundos: 240,
-    cronometroRodando: false,
-    emGoldenScore: false,
-    sonoMama: false,
+    tatameId: '',
+    tatameNome: 'Nenhum tatame carregado',
+    apiConectada: false,
+    carregandoBackend: false,
+    erroBackend: null,
 
-    osaekomiAtivo: false,
-    osaekomiCor: null,
-    osaekomiSegundos: 0,
+    ...ESTADO_LUTA_VAZIA,
 
-    ipponBranco: 0,
-    wazaAriBranco: 0,
-    shidoBranco: 0,
-
-    ipponAzul: 0,
-    wazaAriAzul: 0,
-    shidoAzul: 0,
-
-    lutaFinalizada: false,
-    vencedor: null,
-    tipoVitoria: null,
-
-    setTatame: (tatameId: string, tatameNome: string) => {
-      set({ tatameId, tatameNome });
-      get().sincronizarComBackend();
+    limparSessao: () => {
+      set({
+        campeonatos: [],
+        campeonatoId: '',
+        tatames: [],
+        lutasDisponiveis: [],
+        tatameId: '',
+        tatameNome: 'Nenhum tatame carregado',
+        apiConectada: false,
+        carregandoBackend: false,
+        erroBackend: null,
+        ...ESTADO_LUTA_VAZIA,
+      });
     },
 
-    carregarLuta: (luta: LutaDetalhesDto) => {
+    carregarLuta: (luta: LutaDetalhesDto | null) => {
+      if (!luta) {
+        set({ ...ESTADO_LUTA_VAZIA });
+        return;
+      }
+      const tempoInicial = luta.tempoLutaSegundos || 240;
       set({
         lutaId: luta.id,
         atletaBrancoId: luta.atletaBranco?.id,
         atletaAzulId: luta.atletaAzul?.id,
-        atletaBrancoNome: luta.atletaBranco?.nome || 'Atleta Shiro',
-        atletaBrancoClube: `${luta.atletaBranco?.siglaAcademia || 'Clube'}`,
-        atletaAzulNome: luta.atletaAzul?.nome || 'Atleta Ao',
-        atletaAzulClube: `${luta.atletaAzul?.siglaAcademia || 'Clube'}`,
-        categoria: `Fase ${luta.fase || 1} • Categoria Oficial`,
-        tempoPrincipalSegundos: luta.placar?.cronometroSegundos ?? 240,
-        tempoInicialSegundos: 240,
+        atletaBrancoNome: luta.atletaBranco?.nome || 'Atleta Branco',
+        atletaBrancoClube:
+          luta.atletaBranco?.nomeAcademia ||
+          luta.atletaBranco?.siglaAcademia ||
+          'Academia não informada',
+        atletaAzulNome: luta.atletaAzul?.nome || 'Atleta Azul',
+        atletaAzulClube:
+          luta.atletaAzul?.nomeAcademia ||
+          luta.atletaAzul?.siglaAcademia ||
+          'Academia não informada',
+        categoria: `Fase ${luta.fase || 1} • Luta #${luta.ordemNaChave || 1}`,
+        tempoPrincipalSegundos: luta.placar?.cronometroSegundos ?? tempoInicial,
+        tempoInicialSegundos: tempoInicial,
         cronometroRodando: luta.placar?.cronometroRodando ?? false,
-        emGoldenScore: luta.emGoldenScore ?? false,
+        emGoldenScore: luta.emGoldenScore ?? luta.placar?.emGoldenScore ?? false,
         sonoMama: luta.placar?.sonoMama ?? false,
         ipponBranco: luta.placar?.ipponBranco ?? 0,
         wazaAriBranco: luta.placar?.wazaAriBranco ?? 0,
+        yukoBranco: luta.placar?.yukoBranco ?? 0,
         shidoBranco: luta.placar?.shidoBranco ?? 0,
         ipponAzul: luta.placar?.ipponAzul ?? 0,
         wazaAriAzul: luta.placar?.wazaAriAzul ?? 0,
+        yukoAzul: luta.placar?.yukoAzul ?? 0,
         shidoAzul: luta.placar?.shidoAzul ?? 0,
         osaekomiAtivo: luta.placar?.osaekomiAtivo ?? false,
         osaekomiCor: luta.placar?.osaekomiCor ?? null,
         osaekomiSegundos: luta.placar?.osaekomiTempoSegundos ?? 0,
         lutaFinalizada: luta.status === 'Finalizada',
+        vencedor: null,
+        tipoVitoria: (luta.tipoVitoria as TipoVitoria) || null,
       });
     },
 
     sincronizarComBackend: async () => {
+      set({ carregandoBackend: true, erroBackend: null });
       try {
-        const s = get();
-        const tatames = await desktopApi.getTatames();
-        const atual = tatames.find((t) => t.id === s.tatameId);
-        if (atual?.lutaAtual) {
-          get().carregarLuta(atual.lutaAtual);
+        const estadoAtual = get();
+        const campeonatos = await desktopApi.getCampeonatos();
+
+        if (!campeonatos || campeonatos.length === 0) {
+          set({
+            campeonatos: [],
+            campeonatoId: '',
+            tatames: [],
+            lutasDisponiveis: [],
+            tatameId: '',
+            tatameNome: 'Nenhum campeonato cadastrado',
+            apiConectada: true,
+            carregandoBackend: false,
+            ...ESTADO_LUTA_VAZIA,
+          });
+          return;
         }
-        set({ apiConectada: true });
-      } catch {
-        set({ apiConectada: false });
+
+        // Mantém o campeonato selecionado ou prioriza um EM_ANDAMENTO
+        const campEscolhido =
+          campeonatos.find((c) => c.id === estadoAtual.campeonatoId) ||
+          campeonatos.find((c) => c.status === 'EM_ANDAMENTO') ||
+          campeonatos[0];
+
+        const [tatames, lutas] = await Promise.all([
+          desktopApi.getTatames(campEscolhido.id),
+          desktopApi.getLutasCampeonato(campEscolhido.id),
+        ]);
+
+        const tatameEscolhido =
+          tatames.find((t) => t.id === estadoAtual.tatameId) || tatames[0] || null;
+
+        set({
+          campeonatos,
+          campeonatoId: campEscolhido.id,
+          tatames,
+          lutasDisponiveis: lutas,
+          tatameId: tatameEscolhido ? tatameEscolhido.id : '',
+          tatameNome: tatameEscolhido
+            ? `Tatame ${tatameEscolhido.numero} - ${tatameEscolhido.nome}`
+            : 'Sem tatames cadastrados',
+          apiConectada: true,
+          carregandoBackend: false,
+          erroBackend: null,
+        });
+
+        if (tatameEscolhido?.lutaAtual) {
+          get().carregarLuta(tatameEscolhido.lutaAtual);
+        } else if (tatameEscolhido) {
+          // Verifica se há alguma luta vinculada ao tatame em andamento
+          const lutaDoTatame =
+            lutas.find(
+              (l) => l.tatameId === tatameEscolhido.id && l.status === 'EmAndamento'
+            ) ||
+            lutas.find(
+              (l) => l.tatameId === tatameEscolhido.id && l.status !== 'Finalizada'
+            ) ||
+            null;
+          get().carregarLuta(lutaDoTatame);
+        } else {
+          get().carregarLuta(null);
+        }
+      } catch (err) {
+        set({
+          apiConectada: false,
+          carregandoBackend: false,
+          erroBackend:
+            err instanceof Error
+              ? err.message
+              : 'Não foi possível conectar ao servidor backend.',
+        });
+      }
+    },
+
+    setCampeonato: async (campeonatoId: string) => {
+      set({ campeonatoId, tatameId: '' });
+      await get().sincronizarComBackend();
+    },
+
+    setTatame: async (tatameId: string) => {
+      const { tatames, lutasDisponiveis } = get();
+      const escolhido = tatames.find((t) => t.id === tatameId);
+      if (!escolhido) return;
+
+      set({
+        tatameId: escolhido.id,
+        tatameNome: `Tatame ${escolhido.numero} - ${escolhido.nome}`,
+      });
+
+      if (escolhido.lutaAtual) {
+        get().carregarLuta(escolhido.lutaAtual);
+      } else {
+        const lutaDoTatame =
+          lutasDisponiveis.find(
+            (l) => l.tatameId === escolhido.id && l.status !== 'Finalizada'
+          ) || null;
+        get().carregarLuta(lutaDoTatame);
+      }
+    },
+
+    selecionarLutaNoTatame: async (lutaId: string) => {
+      const { tatameId } = get();
+      if (!lutaId) {
+        get().carregarLuta(null);
+        return;
+      }
+      try {
+        if (tatameId) {
+          await desktopApi.definirLutaAtualTatame(tatameId, {
+            lutaId,
+            iniciarLuta: true,
+          });
+        }
+        const luta = await desktopApi.getLuta(lutaId);
+        get().carregarLuta(luta);
+        set({ apiConectada: true, erroBackend: null });
+      } catch (err) {
+        // Caso o endpoint definirLutaAtual falhe ou a luta já esteja carregada localmente, busca os detalhes da luta
+        try {
+          const luta = await desktopApi.getLuta(lutaId);
+          get().carregarLuta(luta);
+        } catch {
+          set({
+            erroBackend:
+              err instanceof Error ? err.message : 'Falha ao carregar a luta selecionada',
+          });
+        }
       }
     },
 
     toggleCronometro: () => {
-      const { lutaFinalizada, cronometroRodando, tempoPrincipalSegundos, emGoldenScore, sonoMama } = get();
-      if (lutaFinalizada) return;
+      const {
+        lutaId,
+        lutaFinalizada,
+        cronometroRodando,
+        tempoPrincipalSegundos,
+        emGoldenScore,
+        sonoMama,
+      } = get();
+      if (!lutaId || lutaFinalizada) return;
       const novoRodando = !cronometroRodando;
       set({ cronometroRodando: novoRodando });
       dispararCronometro(novoRodando, tempoPrincipalSegundos, emGoldenScore, sonoMama);
@@ -217,7 +457,7 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
 
     tick: () => {
       const s = get();
-      if (s.lutaFinalizada || !s.cronometroRodando) return;
+      if (!s.lutaId || s.lutaFinalizada || !s.cronometroRodando) return;
 
       let novoTempo = s.tempoPrincipalSegundos;
       let novoOsaeSeg = s.osaekomiSegundos;
@@ -225,7 +465,6 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
       let vencedor: CorJudogi | null = null;
       let tipoVitoria: TipoVitoria | null = null;
 
-      // 1. Atualiza tempo principal (se não estiver em Sono-Mama)
       if (!s.sonoMama) {
         if (s.emGoldenScore) {
           novoTempo += 1;
@@ -233,7 +472,6 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
           if (novoTempo > 0) {
             novoTempo -= 1;
           } else {
-            // Tempo normal esgotou: decide por pontos ou entra em Golden Score
             if (s.wazaAriBranco > s.wazaAriAzul) {
               encerrou = true;
               vencedor = 'Branco';
@@ -242,6 +480,14 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
               encerrou = true;
               vencedor = 'Azul';
               tipoVitoria = 'WazaAri';
+            } else if (s.yukoBranco > s.yukoAzul) {
+              encerrou = true;
+              vencedor = 'Branco';
+              tipoVitoria = 'Yuko';
+            } else if (s.yukoAzul > s.yukoBranco) {
+              encerrou = true;
+              vencedor = 'Azul';
+              tipoVitoria = 'Yuko';
             } else {
               set({ emGoldenScore: true, tempoPrincipalSegundos: 0 });
               dispararCronometro(true, 0, true, s.sonoMama);
@@ -251,13 +497,12 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
         }
       }
 
-      // 2. Atualiza Osaekomi (se ativo)
       if (s.osaekomiAtivo && s.osaekomiCor) {
         novoOsaeSeg += 1;
         const cor = s.osaekomiCor;
         const jaTemWaza = cor === 'Branco' ? s.wazaAriBranco >= 1 : s.wazaAriAzul >= 1;
 
-        if (jaTemWaza && novoOsaeSeg >= 10) {
+        if (jaTemWaza && novoOsaeSeg === 10) {
           encerrou = true;
           vencedor = cor;
           tipoVitoria = 'WazaAriAwaseteIppon';
@@ -299,11 +544,17 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
           tempoPrincipalSegundos: novoTempo,
           osaekomiSegundos: novoOsaeSeg,
         });
+        // Sincroniza a cada segundo com o backend/SignalR para manter o Telão da Arena cravado com o app
+        dispararCronometro(true, novoTempo, s.emGoldenScore, s.sonoMama);
+        if (s.osaekomiAtivo && s.osaekomiCor) {
+          dispararOsaekomi('AtualizarSegundos', s.osaekomiCor, novoOsaeSeg);
+        }
       }
     },
 
     resetTempo: () => {
       const s = get();
+      if (!s.lutaId) return;
       set({
         tempoPrincipalSegundos: s.tempoInicialSegundos,
         cronometroRodando: false,
@@ -318,6 +569,7 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
 
     ajustarTempo: (deltaSegundos: number) => {
       const s = get();
+      if (!s.lutaId) return;
       const novoTempo = Math.max(0, s.tempoPrincipalSegundos + deltaSegundos);
       set({ tempoPrincipalSegundos: novoTempo });
       dispararCronometro(s.cronometroRodando, novoTempo, s.emGoldenScore, s.sonoMama);
@@ -325,6 +577,7 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
 
     toggleGoldenScore: () => {
       const s = get();
+      if (!s.lutaId) return;
       const novoGolden = !s.emGoldenScore;
       const novoTempo = !novoGolden ? s.tempoInicialSegundos : 0;
       set({
@@ -336,14 +589,20 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
 
     toggleSonoMama: () => {
       const s = get();
+      if (!s.lutaId) return;
       const novoSonoMama = !s.sonoMama;
       set({ sonoMama: novoSonoMama });
-      dispararCronometro(s.cronometroRodando, s.tempoPrincipalSegundos, s.emGoldenScore, novoSonoMama);
+      dispararCronometro(
+        s.cronometroRodando,
+        s.tempoPrincipalSegundos,
+        s.emGoldenScore,
+        novoSonoMama
+      );
     },
 
     iniciarOsaekomi: (cor: CorJudogi) => {
-      const { lutaFinalizada } = get();
-      if (lutaFinalizada) return;
+      const { lutaId, lutaFinalizada } = get();
+      if (!lutaId || lutaFinalizada) return;
       set({
         osaekomiAtivo: true,
         osaekomiCor: cor,
@@ -355,6 +614,7 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
 
     toketa: () => {
       const s = get();
+      if (!s.lutaId) return;
       const seg = s.osaekomiSegundos;
       set({
         osaekomiAtivo: false,
@@ -364,9 +624,63 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
       dispararOsaekomi('Toketa', null, seg);
     },
 
+    adicionarYuko: (cor: CorJudogi) => {
+      const s = get();
+      if (!s.lutaId || s.lutaFinalizada) return;
+
+      if (cor === 'Branco') {
+        const novoY = s.yukoBranco + 1;
+        if (s.emGoldenScore) {
+          set({
+            yukoBranco: novoY,
+            lutaFinalizada: true,
+            vencedor: 'Branco',
+            tipoVitoria: 'Yuko',
+            cronometroRodando: false,
+          });
+          dispararPontuacao('Branco', 'Yuko');
+          dispararFimLuta('Branco', 'Yuko');
+        } else {
+          set({ yukoBranco: novoY });
+          dispararPontuacao('Branco', 'Yuko');
+        }
+      } else {
+        const novoY = s.yukoAzul + 1;
+        if (s.emGoldenScore) {
+          set({
+            yukoAzul: novoY,
+            lutaFinalizada: true,
+            vencedor: 'Azul',
+            tipoVitoria: 'Yuko',
+            cronometroRodando: false,
+          });
+          dispararPontuacao('Azul', 'Yuko');
+          dispararFimLuta('Azul', 'Yuko');
+        } else {
+          set({ yukoAzul: novoY });
+          dispararPontuacao('Azul', 'Yuko');
+        }
+      }
+    },
+
+    removerYuko: (cor: CorJudogi) => {
+      const s = get();
+      if (!s.lutaId) return;
+      set((state) => ({
+        yukoBranco:
+          cor === 'Branco' ? Math.max(0, state.yukoBranco - 1) : state.yukoBranco,
+        yukoAzul:
+          cor === 'Azul' ? Math.max(0, state.yukoAzul - 1) : state.yukoAzul,
+        lutaFinalizada: false,
+        vencedor: null,
+        tipoVitoria: null,
+      }));
+      dispararPontuacao(cor, 'CancelarYuko');
+    },
+
     adicionarWazaAri: (cor: CorJudogi) => {
       const s = get();
-      if (s.lutaFinalizada) return;
+      if (!s.lutaId || s.lutaFinalizada) return;
 
       if (cor === 'Branco') {
         const novoW = s.wazaAriBranco + 1;
@@ -426,11 +740,15 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
     },
 
     removerWazaAri: (cor: CorJudogi) => {
-      set((s) => ({
-        wazaAriBranco: cor === 'Branco' ? Math.max(0, s.wazaAriBranco - 1) : s.wazaAriBranco,
-        wazaAriAzul: cor === 'Azul' ? Math.max(0, s.wazaAriAzul - 1) : s.wazaAriAzul,
-        ipponBranco: cor === 'Branco' && s.ipponBranco > 0 ? 0 : s.ipponBranco,
-        ipponAzul: cor === 'Azul' && s.ipponAzul > 0 ? 0 : s.ipponAzul,
+      const s = get();
+      if (!s.lutaId) return;
+      set((state) => ({
+        wazaAriBranco:
+          cor === 'Branco' ? Math.max(0, state.wazaAriBranco - 1) : state.wazaAriBranco,
+        wazaAriAzul:
+          cor === 'Azul' ? Math.max(0, state.wazaAriAzul - 1) : state.wazaAriAzul,
+        ipponBranco: cor === 'Branco' && state.ipponBranco > 0 ? 0 : state.ipponBranco,
+        ipponAzul: cor === 'Azul' && state.ipponAzul > 0 ? 0 : state.ipponAzul,
         lutaFinalizada: false,
         vencedor: null,
         tipoVitoria: null,
@@ -439,6 +757,8 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
     },
 
     adicionarIppon: (cor: CorJudogi) => {
+      const s = get();
+      if (!s.lutaId || s.lutaFinalizada) return;
       set({
         ipponBranco: cor === 'Branco' ? 1 : 0,
         ipponAzul: cor === 'Azul' ? 1 : 0,
@@ -453,7 +773,7 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
 
     adicionarShido: (cor: CorJudogi) => {
       const s = get();
-      if (s.lutaFinalizada) return;
+      if (!s.lutaId || s.lutaFinalizada) return;
 
       if (cor === 'Branco') {
         const novoShido = s.shidoBranco + 1;
@@ -491,9 +811,12 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
     },
 
     removerShido: (cor: CorJudogi) => {
-      set((s) => ({
-        shidoBranco: cor === 'Branco' ? Math.max(0, s.shidoBranco - 1) : s.shidoBranco,
-        shidoAzul: cor === 'Azul' ? Math.max(0, s.shidoAzul - 1) : s.shidoAzul,
+      const s = get();
+      if (!s.lutaId) return;
+      set((state) => ({
+        shidoBranco:
+          cor === 'Branco' ? Math.max(0, state.shidoBranco - 1) : state.shidoBranco,
+        shidoAzul: cor === 'Azul' ? Math.max(0, state.shidoAzul - 1) : state.shidoAzul,
         lutaFinalizada: false,
         vencedor: null,
         tipoVitoria: null,
@@ -513,15 +836,17 @@ export const useScoreboardStore = create<ScoreboardState>((set, get) => {
         osaekomiSegundos: 0,
         ipponBranco: 0,
         wazaAriBranco: 0,
+        yukoBranco: 0,
         shidoBranco: 0,
         ipponAzul: 0,
         wazaAriAzul: 0,
+        yukoAzul: 0,
         shidoAzul: 0,
         lutaFinalizada: false,
         vencedor: null,
         tipoVitoria: null,
       });
-      dispararCronometro(false, tempoSegundos, false, false);
+      get().sincronizarComBackend();
     },
   };
 });
